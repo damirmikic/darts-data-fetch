@@ -1,16 +1,13 @@
 # Core dependencies
 streamlit
 pandas
-requests
 
-# Browser automation (REQUIRED - guarantees 99% success)
-playwright
+# HTTP/2 support for better success rate
+httpx
+h2
 
-# Data visualization
+# Data visualization (optional)
 plotly
-
-# Excel export support (optional)
-openpyxl
 
 # Additional utilities
 python-dateutil
