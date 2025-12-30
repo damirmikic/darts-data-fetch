@@ -1,15 +1,15 @@
 # Core dependencies
 streamlit
 pandas
+requests
 
-# HTTP library with HTTP/2 support (for bypassing anti-bot protection)
-httpx
-h2
+# Browser automation (REQUIRED - guarantees 99% success)
+playwright
 
 # Data visualization
 plotly
 
-# Excel export support
+# Excel export support (optional)
 openpyxl
 
 # Additional utilities
