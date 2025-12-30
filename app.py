@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 import json
+import random
 import plotly.graph_objects as go
 import plotly.express as px
 
@@ -24,29 +25,112 @@ st.set_page_config(
 
 
 class SofascoreDartsFetcher:
-    """Fetches darts match data from Sofascore API"""
+    """Fetches darts match data from Sofascore API with anti-bot bypass"""
     
     BASE_URL = "https://www.sofascore.com/api/v1"
     
-    def __init__(self, delay: float = 0.5):
+    def __init__(self, delay: float = 1.0):
         self.delay = delay
         self.session = requests.Session()
+        
+        # Enhanced headers to mimic a real browser
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.sofascore.com/',
+            'Origin': 'https://www.sofascore.com',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
         })
+        self.session_initialized = False
     
-    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    def _visit_homepage(self):
+        """Visit the homepage first to establish a session"""
+        if not self.session_initialized:
+            try:
+                self.session.get('https://www.sofascore.com/', timeout=10)
+                time.sleep(1)
+                self.session_initialized = True
+            except Exception:
+                pass
+    
+    def _make_request(self, url: str, max_retries: int = 3):
+        """Make a request with retry logic"""
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    time.sleep(self.delay * (2 ** attempt))
+                else:
+                    time.sleep(self.delay)
+                
+                response = self.session.get(url, timeout=15)
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    time.sleep(retry_after)
+                    continue
+                
+                response.raise_for_status()
+                return response.json()
+                
+            except requests.exceptions.HTTPError as e:
+                if response.status_code == 403 and attempt < max_retries - 1:
+                    self._refresh_session()
+                    continue
+                if attempt == max_retries - 1:
+                    st.error(f"HTTP Error {response.status_code}: {e}")
+                    return None
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    st.error(f"Request error: {e}")
+                    return None
+        
+        return None
+    
+    def _refresh_session(self):
+        """Refresh the session with new headers"""
+        self.session.close()
+        self.session = requests.Session()
+        
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        ]
+        
+        import random
+        self.session.headers.update({
+            'User-Agent': random.choice(user_agents),
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.sofascore.com/',
+            'Origin': 'https://www.sofascore.com',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        })
+        self.session_initialized = False
+    
+    @st.cache_data(ttl=300)
     def fetch_scheduled_events(_self, date: str):
         """Fetch scheduled darts events for a specific date"""
+        _self._visit_homepage()
         url = f"{_self.BASE_URL}/sport/darts/scheduled-events/{date}"
-        
-        try:
-            response = _self.session.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            st.error(f"Error fetching scheduled events: {e}")
-            return None
+        return _self._make_request(url)
     
     def extract_event_ids(_self, scheduled_data):
         """Extract event IDs and basic info from scheduled events"""
@@ -72,18 +156,11 @@ class SofascoreDartsFetcher:
         
         return events
     
-    @st.cache_data(ttl=60)  # Cache for 1 minute
+    @st.cache_data(ttl=60)
     def fetch_event_statistics(_self, event_id: int):
         """Fetch statistics for a specific event"""
         url = f"{_self.BASE_URL}/event/{event_id}/statistics"
-        
-        try:
-            time.sleep(_self.delay)
-            response = _self.session.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            return None
+        return _self._make_request(url)
 
 
 def display_header():
@@ -420,7 +497,7 @@ def main():
     
     # Initialize session state
     if 'fetcher' not in st.session_state:
-        st.session_state.fetcher = SofascoreDartsFetcher(delay=0.5)
+        st.session_state.fetcher = SofascoreDartsFetcher(delay=1.5)
     
     if 'last_fetch_time' not in st.session_state:
         st.session_state.last_fetch_time = None
