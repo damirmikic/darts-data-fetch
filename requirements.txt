@@ -1,0 +1,13 @@
+# Core dependencies
+streamlit
+requests
+pandas
+
+# Data visualization
+plotly
+
+# Excel export support
+openpyxl
+
+# Additional utilities
+python-dateutil
