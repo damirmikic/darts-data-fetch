@@ -1,57 +1,28 @@
 import json
 import csv
+import subprocess
 import concurrent.futures
 from datetime import date as dt_date, timedelta, datetime
 from io import StringIO
 import time
 import random
+import tempfile
+import os
 
 import streamlit as st
-import httpx
 import pandas as pd
 
 
 BASE_URL = "https://www.sofascore.com/api/v1/sport/darts"
 
 
-def get_realistic_headers():
-    """Generate realistic browser headers"""
-    return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Referer": "https://www.sofascore.com/",
-        "Origin": "https://www.sofascore.com",
-        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-        "X-Fsign": "SW9D1eZo"
-    }
-
-
-@st.cache_resource
-def get_session_client():
-    """Create and cache httpx client with HTTP/2"""
-    client = httpx.Client(
-        headers=get_realistic_headers(),
-        http2=True,
-        follow_redirects=True,
-        timeout=30.0,
-        verify=True
-    )
-    
-    # Visit homepage to establish session
+def check_curl_available():
+    """Check if curl is available"""
     try:
-        response = client.get('https://www.sofascore.com/darts')
-        time.sleep(random.uniform(1, 2))
+        result = subprocess.run(['curl', '--version'], capture_output=True, timeout=5)
+        return result.returncode == 0
     except:
-        pass
-    
-    return client
+        return False
 
 
 def generate_date_range(start_date, end_date):
@@ -63,8 +34,10 @@ def generate_date_range(start_date, end_date):
         current_date += delta
 
 
-def fetch_json(url, client, max_retries=3):
-    """Fetch JSON with retry logic"""
+def fetch_json_with_curl(url, cookie_file=None, max_retries=3):
+    """
+    Fetch JSON using curl command - often bypasses protections better than Python libraries
+    """
     for attempt in range(max_retries):
         try:
             if attempt > 0:
@@ -73,30 +46,84 @@ def fetch_json(url, client, max_retries=3):
             else:
                 time.sleep(random.uniform(1, 2))
             
-            response = client.get(url)
+            # Build curl command
+            curl_cmd = [
+                'curl', '-s',
+                '-H', 'Accept: */*',
+                '-H', 'Accept-Language: en-US,en;q=0.9',
+                '-H', 'Referer: https://www.sofascore.com/',
+                '-H', 'Origin: https://www.sofascore.com',
+                '-H', 'sec-fetch-dest: empty',
+                '-H', 'sec-fetch-mode: cors',
+                '-H', 'sec-fetch-site: same-origin',
+                '-H', 'X-Fsign: SW9D1eZo',
+                '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                '--compressed'
+            ]
             
-            if response.status_code == 429:
-                retry_after = int(response.headers.get('retry-after', 60))
-                time.sleep(retry_after)
+            # Add cookie file if exists
+            if cookie_file and os.path.exists(cookie_file):
+                curl_cmd.extend(['-b', cookie_file, '-c', cookie_file])
+            
+            curl_cmd.append(url)
+            
+            # Execute curl
+            result = subprocess.run(
+                curl_cmd,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode != 0:
+                if attempt < max_retries - 1:
+                    continue
+                raise Exception(f"curl failed with code {result.returncode}")
+            
+            # Check for 403/404 in response
+            if '403' in result.stdout or 'Forbidden' in result.stdout:
+                if attempt < max_retries - 1:
+                    continue
+                raise Exception("403 Forbidden")
+            
+            if '404' in result.stdout or 'Not Found' in result.stdout:
+                raise Exception("404 Not Found")
+            
+            # Parse JSON
+            try:
+                data = json.loads(result.stdout)
+                return data
+            except json.JSONDecodeError:
+                if attempt < max_retries - 1:
+                    continue
+                raise Exception("Invalid JSON response")
+                
+        except subprocess.TimeoutExpired:
+            if attempt < max_retries - 1:
                 continue
-            
-            if response.status_code == 403 and attempt < max_retries - 1:
-                # Refresh headers
-                client.headers.update(get_realistic_headers())
-                time.sleep(5)
-                continue
-            
-            response.raise_for_status()
-            return response.json()
-            
-        except httpx.HTTPStatusError as e:
-            if attempt == max_retries - 1:
-                raise Exception(f"HTTP {e.response.status_code}")
+            raise Exception("Request timeout")
         except Exception as e:
             if attempt == max_retries - 1:
                 raise e
     
     return None
+
+
+def init_session_cookies(cookie_file):
+    """Initialize session by visiting homepage with curl"""
+    try:
+        curl_cmd = [
+            'curl', '-s',
+            '-c', cookie_file,
+            '-A', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'https://www.sofascore.com/darts'
+        ]
+        
+        subprocess.run(curl_cmd, capture_output=True, timeout=15)
+        time.sleep(2)
+        return True
+    except:
+        return False
 
 
 def extract_event_data(event):
@@ -127,10 +154,14 @@ def extract_event_data(event):
     }
 
 
-def fetch_events_for_date(date_str, client):
-    """Fetch events for a specific date"""
+def fetch_events_for_date(date_str, cookie_file):
+    """Fetch events for a specific date using curl"""
     events_url = f"{BASE_URL}/scheduled-events/{date_str}"
-    events_data = fetch_json(events_url, client)
+    events_data = fetch_json_with_curl(events_url, cookie_file)
+    
+    if not events_data:
+        return []
+    
     events = events_data.get("events", [])
     
     result = []
@@ -142,12 +173,12 @@ def fetch_events_for_date(date_str, client):
     return result
 
 
-def fetch_event_statistics(event_id, client):
-    """Fetch statistics for a specific event"""
+def fetch_event_statistics(event_id, cookie_file):
+    """Fetch statistics for a specific event using curl"""
     stats_url = f"https://www.sofascore.com/api/v1/event/{event_id}/statistics"
     
     try:
-        stats_data = fetch_json(stats_url, client)
+        stats_data = fetch_json_with_curl(stats_url, cookie_file)
         return parse_statistics(stats_data)
     except:
         return {}
@@ -174,21 +205,38 @@ def parse_statistics(stats_data):
 
 def fetch_rows_for_date_task(args):
     """Wrapper for threading that unpacks arguments"""
-    date_str, fetch_stats = args
-    client = get_session_client()
+    date_str, fetch_stats, session_id = args
+    
+    # Create temporary cookie file for this thread
+    cookie_file = f"/tmp/sofascore_cookies_{session_id}_{date_str}.txt"
     
     try:
-        rows = fetch_events_for_date(date_str, client)
+        # Initialize session
+        init_session_cookies(cookie_file)
+        
+        # Fetch events
+        rows = fetch_events_for_date(date_str, cookie_file)
         
         # Optionally fetch statistics for each event
         if fetch_stats and rows:
             for row in rows:
-                stats = fetch_event_statistics(row['eventId'], client)
+                stats = fetch_event_statistics(row['eventId'], cookie_file)
                 row.update(stats)
                 time.sleep(0.5)  # Be nice to the API
         
+        # Cleanup cookie file
+        try:
+            os.remove(cookie_file)
+        except:
+            pass
+        
         return date_str, rows, None
     except Exception as e:
+        # Cleanup cookie file on error
+        try:
+            os.remove(cookie_file)
+        except:
+            pass
         return date_str, [], str(e)
 
 
@@ -299,15 +347,25 @@ def render_download_section(prepared_exports):
 def run_streamlit_app():
     st.set_page_config(page_title="🎯 Sofascore Darts Exporter", layout="wide")
     st.title("🎯 Sofascore Darts Data Exporter")
-    st.caption("Cloud-friendly scraper with HTTP/2 - Works on Streamlit Cloud!")
+    st.caption("Using curl for maximum reliability - Works everywhere!")
+
+    # Check curl availability
+    if not check_curl_available():
+        st.error("❌ curl is not installed or not available in PATH")
+        st.info("""
+        **To install curl:**
+        - **Ubuntu/Debian:** `sudo apt-get install curl`
+        - **macOS:** `brew install curl` (usually pre-installed)
+        - **Windows:** Download from https://curl.se/windows/
+        
+        Note: Streamlit Cloud has curl pre-installed!
+        """)
+        st.stop()
+    
+    st.success("✓ curl is available")
 
     if "selected_dates" not in st.session_state:
         st.session_state["selected_dates"] = []
-
-    # Initialize session
-    with st.spinner("Initializing HTTP/2 session..."):
-        client = get_session_client()
-        st.success("✓ Session ready!")
 
     # --- DATE SELECTION UI ---
     st.subheader("1️⃣ Select Dates")
@@ -377,6 +435,9 @@ def run_streamlit_app():
 
     if st.button("🚀 Start Scraping", type="primary", disabled=not st.session_state["selected_dates"]):
         
+        # Generate unique session ID for this scraping session
+        session_id = int(time.time())
+        
         results = []
         dates_to_fetch = st.session_state["selected_dates"]
         
@@ -384,7 +445,7 @@ def run_streamlit_app():
         status_text = st.empty()
         
         # Prepare arguments for threading
-        tasks = [(d, fetch_stats) for d in dates_to_fetch]
+        tasks = [(d, fetch_stats, session_id) for d in dates_to_fetch]
         
         completed_count = 0
         total_count = len(tasks)
@@ -399,11 +460,12 @@ def run_streamlit_app():
                 
                 progress = completed_count / total_count
                 progress_bar.progress(progress)
-                status_text.write(f"✓ Finished {d_str} ({completed_count}/{total_count}) - {len(rows)} matches")
                 
                 if err:
+                    status_text.write(f"✗ Error {d_str} ({completed_count}/{total_count}): {err}")
                     st.error(f"Error scraping {d_str}: {err}")
                 else:
+                    status_text.write(f"✓ Finished {d_str} ({completed_count}/{total_count}) - {len(rows)} matches")
                     results.append({"date": d_str, "rows": rows})
 
         # Sort results by date
@@ -426,8 +488,8 @@ def run_streamlit_app():
     st.markdown("---")
     st.markdown("""
         <div style='text-align: center; color: #666;'>
-            <p>Made with ❤️ using Streamlit & httpx | Data from Sofascore API</p>
-            <p style='font-size: 0.8em;'>Using HTTP/2 protocol for reliable cloud deployment</p>
+            <p>Made with ❤️ using Streamlit & curl | Data from Sofascore API</p>
+            <p style='font-size: 0.8em;'>Using native curl for maximum compatibility</p>
         </div>
     """, unsafe_allow_html=True)
 
