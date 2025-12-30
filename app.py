@@ -13,6 +13,14 @@ import random
 import plotly.graph_objects as go
 import plotly.express as px
 
+# Check if httpx is available
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+    st.error("httpx library not found. Please install with: pip install httpx[http2]")
+
 
 # Page configuration
 st.set_page_config(
@@ -24,117 +32,100 @@ st.set_page_config(
 
 
 class SofascoreDartsFetcher:
-    """Fetches darts match data from Sofascore API using Playwright"""
+    """Fetches darts match data from Sofascore API using httpx with HTTP/2"""
     
     BASE_URL = "https://www.sofascore.com/api/v1"
     
-    def __init__(self, delay: float = 1.5):
+    def __init__(self, delay: float = 2.0):
         self.delay = delay
-        self.playwright = None
-        self.browser = None
-        self.context = None
-        self.page = None
-        self.session_initialized = False
+        self.client = None
+        self._init_client()
     
-    def _start_browser(self):
-        """Start Playwright browser"""
-        if self.session_initialized:
-            return True
+    def _init_client(self):
+        """Initialize httpx client with HTTP/2 and realistic headers"""
+        if not HTTPX_AVAILABLE:
+            return
+            
+        if self.client:
+            self.client.close()
         
-        try:
-            from playwright.sync_api import sync_playwright
-            
-            self.playwright = sync_playwright().start()
-            
-            # Launch browser in headless mode
-            self.browser = self.playwright.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--no-sandbox',
-                ]
-            )
-            
-            # Create context with realistic settings
-            self.context = self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                locale='en-US',
-                timezone_id='America/New_York',
-            )
-            
-            # Create page
-            self.page = self.context.new_page()
-            
-            # Remove webdriver detection
-            self.page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-            """)
-            
-            self.session_initialized = True
-            return True
-            
-        except ImportError:
-            st.error("❌ Playwright is not installed!")
-            st.info("Install with: pip install playwright && playwright install chromium")
-            return False
-        except Exception as e:
-            st.error(f"Failed to start browser: {e}")
-            return False
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.sofascore.com/',
+            'Origin': 'https://www.sofascore.com',
+            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+        }
+        
+        self.client = httpx.Client(
+            headers=headers,
+            http2=True,  # Enable HTTP/2
+            follow_redirects=True,
+            timeout=30.0,
+            verify=True
+        )
     
     def _visit_homepage(self):
         """Visit homepage to establish session"""
-        if not self.session_initialized:
-            if not self._start_browser():
-                return False
-        
+        if not HTTPX_AVAILABLE or not self.client:
+            return False
+            
         try:
-            self.page.goto('https://www.sofascore.com/', wait_until='networkidle', timeout=30000)
-            time.sleep(random.uniform(1, 2))
-            return True
+            response = self.client.get('https://www.sofascore.com/')
+            time.sleep(random.uniform(1.5, 2.5))
+            return response.status_code == 200
         except Exception as e:
             st.warning(f"Could not visit homepage: {e}")
             return False
     
     def _make_request(self, url: str, max_retries: int = 3):
-        """Make a request using Playwright"""
-        if not self.session_initialized:
-            if not self._start_browser():
-                return None
-            self._visit_homepage()
-        
+        """Make a request with retry logic"""
+        if not HTTPX_AVAILABLE or not self.client:
+            st.error("httpx is not available. Please install: pip install httpx[http2]")
+            return None
+            
         for attempt in range(max_retries):
             try:
-                # Add delay
                 if attempt > 0:
-                    wait_time = self.delay * (2 ** attempt)
+                    wait_time = self.delay * (2 ** attempt) + random.uniform(1, 3)
                     time.sleep(wait_time)
                 else:
-                    time.sleep(self.delay + random.uniform(0, 0.5))
+                    time.sleep(self.delay + random.uniform(0.5, 1.5))
                 
-                # Navigate to API endpoint
-                response = self.page.goto(url, wait_until='networkidle', timeout=30000)
+                response = self.client.get(url)
                 
-                if response.status == 200:
-                    # Get JSON content
-                    json_text = self.page.evaluate('''() => {
-                        const pre = document.querySelector('pre');
-                        return pre ? pre.textContent : document.body.textContent;
-                    }''')
-                    
-                    data = json.loads(json_text)
-                    return data
-                else:
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('retry-after', 60))
+                    time.sleep(retry_after)
+                    continue
+                
+                if response.status_code == 403:
                     if attempt < max_retries - 1:
-                        continue
+                        self._init_client()
+                        self._visit_homepage()
+                    continue
+                
+                response.raise_for_status()
+                return response.json()
+                
+            except httpx.HTTPStatusError as e:
+                if attempt == max_retries - 1:
+                    st.error(f"HTTP Error {e.response.status_code}")
                     return None
-                    
+            except httpx.RequestError as e:
+                if attempt == max_retries - 1:
+                    st.error(f"Request Error: {e}")
+                    return None
             except Exception as e:
                 if attempt == max_retries - 1:
-                    st.error(f"Request failed: {e}")
+                    st.error(f"Error: {e}")
                     return None
         
         return None
@@ -174,17 +165,12 @@ class SofascoreDartsFetcher:
         return self._make_request(url)
     
     def close(self):
-        """Close Playwright browser"""
-        try:
-            if self.context:
-                self.context.close()
-            if self.browser:
-                self.browser.close()
-            if self.playwright:
-                self.playwright.stop()
-            self.session_initialized = False
-        except Exception:
-            pass
+        """Close httpx client"""
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
 
 
 def display_header():
@@ -519,9 +505,24 @@ def export_data(events_df, all_stats, format_type):
 def main():
     """Main application logic"""
     
+    # Check httpx availability first
+    if not HTTPX_AVAILABLE:
+        st.error("❌ httpx library is required but not installed!")
+        st.info("""
+        **To install httpx:**
+        ```bash
+        pip install httpx[http2]
+        ```
+        After installation, refresh this page.
+        """)
+        st.stop()
+    
     # Initialize session state
     if 'fetcher' not in st.session_state:
-        st.session_state.fetcher = SofascoreDartsFetcher(delay=1.5)
+        st.session_state.fetcher = SofascoreDartsFetcher(delay=2.0)
+        # Visit homepage on initialization
+        with st.spinner("Initializing session..."):
+            st.session_state.fetcher._visit_homepage()
     
     if 'last_fetch_time' not in st.session_state:
         st.session_state.last_fetch_time = None
@@ -532,31 +533,8 @@ def main():
     # Display sidebar and get settings
     settings = display_sidebar()
     
-    # Check Playwright installation
-    try:
-        from playwright.sync_api import sync_playwright
-        playwright_installed = True
-    except ImportError:
-        playwright_installed = False
-        st.error("❌ Playwright is not installed!")
-        st.info("""
-        **To install Playwright:**
-        ```bash
-        pip install playwright
-        playwright install chromium
-        ```
-        After installation, refresh this page.
-        """)
-        return
-    
-    if not playwright_installed:
-        st.stop()
-    
-    # Show browser status
-    if st.session_state.fetcher.session_initialized:
-        st.sidebar.success("✓ Browser Ready")
-    else:
-        st.sidebar.info("Browser will start on first fetch")
+    # Show connection status
+    st.sidebar.success("✓ httpx HTTP/2 Ready")
     
     # Fetch button
     fetch_button = st.button("🔄 Fetch Data", type="primary", use_container_width=True)
@@ -672,17 +650,12 @@ def main():
     st.markdown(
         """
         <div style='text-align: center'>
-            <p>Made with ❤️ using Streamlit & Playwright | Data from Sofascore API</p>
-            <p style='font-size: 0.8em; color: #666;'>Using real browser automation for 99% success rate</p>
+            <p>Made with ❤️ using Streamlit & httpx | Data from Sofascore API</p>
+            <p style='font-size: 0.8em; color: #666;'>Using HTTP/2 protocol for reliable data access</p>
         </div>
         """,
         unsafe_allow_html=True
     )
-    
-    # Cleanup on session end (won't execute immediately but good practice)
-    if st.session_state.get('fetcher') and hasattr(st.session_state.fetcher, 'close'):
-        # Register cleanup (Streamlit doesn't have perfect cleanup hooks)
-        pass
 
 
 if __name__ == "__main__":
