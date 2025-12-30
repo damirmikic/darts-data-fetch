@@ -1,13 +1,15 @@
+# Minimal Requirements - Uses curl (system command)
+# curl must be installed on the system
+
 # Core dependencies
 streamlit
 pandas
 
-# HTTP/2 support for better success rate
-httpx
-h2
-
-# Data visualization (optional)
-plotly
-
 # Additional utilities
 python-dateutil
+
+# Note: curl must be installed separately:
+# Ubuntu/Debian: sudo apt-get install curl
+# macOS: brew install curl (usually pre-installed)
+# Windows: Download from https://curl.se/windows/
+# Streamlit Cloud: curl is pre-installed ✓
