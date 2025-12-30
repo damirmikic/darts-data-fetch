@@ -95,25 +95,37 @@ class SofascoreDartsFetcher:
             try:
                 if attempt > 0:
                     wait_time = self.delay * (2 ** attempt) + random.uniform(1, 3)
+                    st.info(f"Retry {attempt + 1}/{max_retries} after {wait_time:.1f}s...")
                     time.sleep(wait_time)
                 else:
                     time.sleep(self.delay + random.uniform(0.5, 1.5))
                 
                 response = self.client.get(url)
                 
+                st.info(f"HTTP Status: {response.status_code}")
+                
                 if response.status_code == 429:
                     retry_after = int(response.headers.get('retry-after', 60))
+                    st.warning(f"Rate limited. Waiting {retry_after}s...")
                     time.sleep(retry_after)
                     continue
                 
                 if response.status_code == 403:
+                    st.error("403 Forbidden - Access denied")
                     if attempt < max_retries - 1:
                         self._init_client()
                         self._visit_homepage()
                     continue
                 
-                response.raise_for_status()
-                return response.json()
+                if response.status_code == 200:
+                    data = response.json()
+                    st.success("✓ Successfully fetched data!")
+                    # Show preview of data
+                    st.json({"preview": str(data)[:200] + "..."})
+                    return data
+                else:
+                    st.error(f"Unexpected status code: {response.status_code}")
+                    response.raise_for_status()
                 
             except httpx.HTTPStatusError as e:
                 if attempt == max_retries - 1:
@@ -133,7 +145,15 @@ class SofascoreDartsFetcher:
     def fetch_scheduled_events(self, date: str):
         """Fetch scheduled darts events for a specific date"""
         url = f"{self.BASE_URL}/sport/darts/scheduled-events/{date}"
-        return self._make_request(url)
+        result = self._make_request(url)
+        
+        # Debug output
+        if result:
+            st.info(f"✓ API returned data with {len(result.get('events', []))} events")
+        else:
+            st.warning("✗ API returned None or empty")
+        
+        return result
     
     def extract_event_ids(_self, scheduled_data):
         """Extract event IDs and basic info from scheduled events"""
