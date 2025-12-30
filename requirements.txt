@@ -2,14 +2,15 @@
 streamlit
 pandas
 
+# HTTP library with HTTP/2 support (for bypassing anti-bot protection)
+httpx
+h2
+
 # Data visualization
 plotly
 
 # Excel export support
 openpyxl
-
-# Browser automation (for bypassing anti-bot protection)
-playwright
 
 # Additional utilities
 python-dateutil
