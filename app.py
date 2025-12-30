@@ -143,17 +143,30 @@ class SofascoreDartsFetcher:
             return events
         
         for event in scheduled_data.get('events', []):
+            # Extract nested data safely
+            home_team = event.get('homeTeam', {})
+            away_team = event.get('awayTeam', {})
+            tournament = event.get('tournament', {})
+            status = event.get('status', {})
+            round_info = event.get('roundInfo', {})
+            home_score = event.get('homeScore', {})
+            away_score = event.get('awayScore', {})
+            
             event_info = {
                 'id': event.get('id'),
                 'slug': event.get('slug'),
                 'startTimestamp': event.get('startTimestamp'),
                 'startTime': datetime.fromtimestamp(event.get('startTimestamp', 0)).strftime('%Y-%m-%d %H:%M:%S'),
-                'homeTeam': event.get('homeTeam', {}).get('name'),
-                'awayTeam': event.get('awayTeam', {}).get('name'),
-                'tournament': event.get('tournament', {}).get('name'),
+                'homeTeam': home_team.get('name', 'Unknown'),
+                'awayTeam': away_team.get('name', 'Unknown'),
+                'tournament': tournament.get('name', 'Unknown'),
+                'round': round_info.get('name', ''),
+                'status': status.get('description', 'Unknown'),
+                'homeScore': home_score.get('display', 0),
+                'awayScore': away_score.get('display', 0),
                 'bestOfSets': event.get('bestOfSets'),
                 'bestOfLegs': event.get('bestOfLegs'),
-                'status': event.get('status', {}).get('type', 'scheduled')
+                'winnerCode': event.get('winnerCode', 0)
             }
             events.append(event_info)
         
@@ -274,8 +287,12 @@ def display_events_table(events_df):
     st.subheader(f"📅 Found {len(events_df)} Matches")
     
     # Format the dataframe for display
-    display_df = events_df[['startTime', 'homeTeam', 'awayTeam', 'tournament', 'status']].copy()
-    display_df.columns = ['Start Time', 'Home', 'Away', 'Tournament', 'Status']
+    display_df = events_df[[
+        'startTime', 'homeTeam', 'homeScore', 'awayScore', 'awayTeam', 
+        'tournament', 'round', 'status'
+    ]].copy()
+    
+    display_df.columns = ['Start Time', 'Home', 'Score (H)', 'Score (A)', 'Away', 'Tournament', 'Round', 'Status']
     
     st.dataframe(
         display_df,
