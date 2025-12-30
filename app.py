@@ -1,80 +1,57 @@
 import json
-import asyncio
 import csv
-import subprocess
 import concurrent.futures
 from datetime import date as dt_date, timedelta, datetime
 from io import StringIO
+import time
+import random
 
 import streamlit as st
-import requests
-from playwright.async_api import async_playwright
-from playwright.sync_api import sync_playwright
+import httpx
 import pandas as pd
-import plotly.graph_objects as go
 
 
 BASE_URL = "https://www.sofascore.com/api/v1/sport/darts"
-PLAYWRIGHT_CMD = ["playwright", "install", "chromium"]
 
 
-@st.cache_resource(show_spinner=False)
-def install_playwright():
-    """
-    Ensures the Playwright Chromium browser is installed once per Streamlit session.
-    """
+def get_realistic_headers():
+    """Generate realistic browser headers"""
+    return {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Referer": "https://www.sofascore.com/",
+        "Origin": "https://www.sofascore.com",
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+        "X-Fsign": "SW9D1eZo"
+    }
+
+
+@st.cache_resource
+def get_session_client():
+    """Create and cache httpx client with HTTP/2"""
+    client = httpx.Client(
+        headers=get_realistic_headers(),
+        http2=True,
+        follow_redirects=True,
+        timeout=30.0,
+        verify=True
+    )
+    
+    # Visit homepage to establish session
     try:
-        subprocess.run(PLAYWRIGHT_CMD, check=True, timeout=300)
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError("Failed to install Playwright Chromium.") from exc
-    return True
-
-
-async def get_sofascore_session_data(headless=True):
-    """
-    Launches a browser to get valid Cloudflare cookies and the specific User-Agent.
-    """
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            viewport={'width': 1920, 'height': 1080}
-        )
-        page = await context.new_page()
-
-        try:
-            # Go to the main Darts page
-            await page.goto("https://www.sofascore.com/darts", timeout=60000, wait_until="domcontentloaded")
-
-            # Wait for network to settle (handles Cloudflare challenges better than sleep)
-            try:
-                await page.wait_for_load_state("networkidle", timeout=10000)
-            except:
-                pass
-
-            # Attempt to close cookie consent if it exists
-            try:
-                await page.locator("button:has-text('Agree')").click(timeout=2000)
-            except:
-                pass
-
-            # Force some interaction to prove humanity
-            try:
-                await page.wait_for_selector("a[href*='/match']", timeout=5000)
-            except:
-                pass
-
-            cookies = await context.cookies()
-            # CRITICAL: Get the actual UA used by Playwright to match headers later
-            user_agent = await page.evaluate("navigator.userAgent")
-            
-            return cookies, user_agent
-
-        finally:
-            await browser.close()
-
-
-def cookies_to_header(cookie_list):
-    return "; ".join([f"{c['name']}={c['value']}" for c in cookie_list])
+        response = client.get('https://www.sofascore.com/darts')
+        time.sleep(random.uniform(1, 2))
+    except:
+        pass
+    
+    return client
 
 
 def generate_date_range(start_date, end_date):
@@ -86,59 +63,40 @@ def generate_date_range(start_date, end_date):
         current_date += delta
 
 
-def fetch_json_with_playwright(url, headers):
-    """
-    Fallback mechanism: Launches a sync browser to bypass stubborn WAFs.
-    Uses the same User-Agent as the session to avoid fingerprint mismatch.
-    """
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=headers.get("User-Agent", "Mozilla/5.0"),
-            extra_http_headers=headers
-        )
-        page = context.new_page()
-        
+def fetch_json(url, client, max_retries=3):
+    """Fetch JSON with retry logic"""
+    for attempt in range(max_retries):
         try:
-            page.goto(url, wait_until="networkidle", timeout=30000)
-        except:
-            # sometimes networkidle fails on APIs, try load
-            page.goto(url, wait_until="load", timeout=30000)
+            if attempt > 0:
+                wait_time = 2 ** attempt + random.uniform(1, 2)
+                time.sleep(wait_time)
+            else:
+                time.sleep(random.uniform(1, 2))
             
-        page.wait_for_timeout(1000) # Short stabilization
-
-        raw = None
-        pre = page.locator("pre")
-        if pre.count():
-            raw = pre.first.inner_text()
-        else:
-            raw = page.inner_text("body")
-
-        browser.close()
-
-    if not raw:
-        raise ValueError("Unable to extract JSON payload from Sofascore response.")
-
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Received non-JSON payload from Sofascore.") from exc
-
-
-def fetch_json(url, headers):
-    """
-    Primary fetch method using Requests. Falls back to Playwright on 403.
-    """
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 403:
-            # print("403 - cookies invalid or missing, retrying with Playwright rendering...")
-            return fetch_json_with_playwright(url, headers)
-        r.raise_for_status()
-        return r.json()
-    except requests.RequestException:
-        # Network error, try fallback
-        return fetch_json_with_playwright(url, headers)
+            response = client.get(url)
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('retry-after', 60))
+                time.sleep(retry_after)
+                continue
+            
+            if response.status_code == 403 and attempt < max_retries - 1:
+                # Refresh headers
+                client.headers.update(get_realistic_headers())
+                time.sleep(5)
+                continue
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except httpx.HTTPStatusError as e:
+            if attempt == max_retries - 1:
+                raise Exception(f"HTTP {e.response.status_code}")
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+    
+    return None
 
 
 def extract_event_data(event):
@@ -163,26 +121,16 @@ def extract_event_data(event):
         'tournament': tournament.get('name', 'Unknown'),
         'round': round_info.get('name', ''),
         'status': status.get('description', 'Unknown'),
-        'bestOfSets': event.get('bestOfSets'),
-        'bestOfLegs': event.get('bestOfLegs'),
+        'bestOfSets': event.get('bestOfSets', ''),
+        'bestOfLegs': event.get('bestOfLegs', ''),
         'winnerCode': event.get('winnerCode', 0)
     }
 
 
-def fetch_events_for_date(date_str, cookies_header, user_agent):
+def fetch_events_for_date(date_str, client):
     """Fetch events for a specific date"""
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "application/json",
-        "Referer": "https://www.sofascore.com/",
-        "X-Fsign": "SW9D1eZo",
-        "Cookie": cookies_header
-    }
-
     events_url = f"{BASE_URL}/scheduled-events/{date_str}"
-
-    # Fetch Events
-    events_data = fetch_json(events_url, headers)
+    events_data = fetch_json(events_url, client)
     events = events_data.get("events", [])
     
     result = []
@@ -194,20 +142,12 @@ def fetch_events_for_date(date_str, cookies_header, user_agent):
     return result
 
 
-def fetch_event_statistics(event_id, cookies_header, user_agent):
+def fetch_event_statistics(event_id, client):
     """Fetch statistics for a specific event"""
-    headers = {
-        "User-Agent": user_agent,
-        "Accept": "application/json",
-        "Referer": "https://www.sofascore.com/",
-        "X-Fsign": "SW9D1eZo",
-        "Cookie": cookies_header
-    }
-
     stats_url = f"https://www.sofascore.com/api/v1/event/{event_id}/statistics"
     
     try:
-        stats_data = fetch_json(stats_url, headers)
+        stats_data = fetch_json(stats_url, client)
         return parse_statistics(stats_data)
     except:
         return {}
@@ -234,15 +174,18 @@ def parse_statistics(stats_data):
 
 def fetch_rows_for_date_task(args):
     """Wrapper for threading that unpacks arguments"""
-    date_str, cookies_header, user_agent, fetch_stats = args
+    date_str, fetch_stats = args
+    client = get_session_client()
+    
     try:
-        rows = fetch_events_for_date(date_str, cookies_header, user_agent)
+        rows = fetch_events_for_date(date_str, client)
         
         # Optionally fetch statistics for each event
         if fetch_stats and rows:
             for row in rows:
-                stats = fetch_event_statistics(row['eventId'], cookies_header, user_agent)
+                stats = fetch_event_statistics(row['eventId'], client)
                 row.update(stats)
+                time.sleep(0.5)  # Be nice to the API
         
         return date_str, rows, None
     except Exception as e:
@@ -356,17 +299,15 @@ def render_download_section(prepared_exports):
 def run_streamlit_app():
     st.set_page_config(page_title="🎯 Sofascore Darts Exporter", layout="wide")
     st.title("🎯 Sofascore Darts Data Exporter")
-    st.caption("Multi-threaded scraper with Playwright anti-bot evasion - Always works!")
-
-    try:
-        with st.spinner("Ensuring Playwright Chromium is available..."):
-            install_playwright()
-    except RuntimeError as exc:
-        st.error(f"{exc}")
-        st.stop()
+    st.caption("Cloud-friendly scraper with HTTP/2 - Works on Streamlit Cloud!")
 
     if "selected_dates" not in st.session_state:
         st.session_state["selected_dates"] = []
+
+    # Initialize session
+    with st.spinner("Initializing HTTP/2 session..."):
+        client = get_session_client()
+        st.success("✓ Session ready!")
 
     # --- DATE SELECTION UI ---
     st.subheader("1️⃣ Select Dates")
@@ -436,22 +377,6 @@ def run_streamlit_app():
 
     if st.button("🚀 Start Scraping", type="primary", disabled=not st.session_state["selected_dates"]):
         
-        # 1. GET COOKIES (Cached in Session State if possible)
-        if "sofascore_cookies" not in st.session_state or "sofascore_ua" not in st.session_state:
-            try:
-                with st.spinner("🔐 Initializing Browser Session (Bypassing Anti-Bot)..."):
-                    cookies, ua = asyncio.run(get_sofascore_session_data())
-                    st.session_state["sofascore_cookies"] = cookies
-                    st.session_state["sofascore_ua"] = ua
-                    st.success("✓ Session initialized successfully!")
-            except Exception as exc:
-                st.error(f"Failed to initialize session: {exc}")
-                st.stop()
-        
-        cookies_header = cookies_to_header(st.session_state["sofascore_cookies"])
-        user_agent = st.session_state["sofascore_ua"]
-
-        # 2. PARALLEL FETCH
         results = []
         dates_to_fetch = st.session_state["selected_dates"]
         
@@ -459,13 +384,13 @@ def run_streamlit_app():
         status_text = st.empty()
         
         # Prepare arguments for threading
-        tasks = [(d, cookies_header, user_agent, fetch_stats) for d in dates_to_fetch]
+        tasks = [(d, fetch_stats) for d in dates_to_fetch]
         
         completed_count = 0
         total_count = len(tasks)
 
         # Use ThreadPoolExecutor for concurrency
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             future_to_date = {executor.submit(fetch_rows_for_date_task, task): task[0] for task in tasks}
             
             for future in concurrent.futures.as_completed(future_to_date):
@@ -501,8 +426,8 @@ def run_streamlit_app():
     st.markdown("---")
     st.markdown("""
         <div style='text-align: center; color: #666;'>
-            <p>Made with ❤️ using Streamlit & Playwright | Data from Sofascore API</p>
-            <p style='font-size: 0.8em;'>Using real browser automation for 99% success rate</p>
+            <p>Made with ❤️ using Streamlit & httpx | Data from Sofascore API</p>
+            <p style='font-size: 0.8em;'>Using HTTP/2 protocol for reliable cloud deployment</p>
         </div>
     """, unsafe_allow_html=True)
 
