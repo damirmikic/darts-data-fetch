@@ -1,6 +1,5 @@
 # Core dependencies
 streamlit
-requests
 pandas
 
 # Data visualization
@@ -8,6 +7,9 @@ plotly
 
 # Excel export support
 openpyxl
+
+# Browser automation (for bypassing anti-bot protection)
+playwright
 
 # Additional utilities
 python-dateutil
